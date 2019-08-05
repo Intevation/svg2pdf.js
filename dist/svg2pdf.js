@@ -3086,8 +3086,15 @@ SOFTWARE.
         x = parseFloat(getAttribute(node, "x") || 0),
         y = parseFloat(getAttribute(node, "y") || 0);
 
+    if (!isFinite(width) || width <= 0 || !isFinite(height) || height <= 0) {
+      return;
+    }
 
     var imageUrl = node.getAttribute("xlink:href") || node.getAttribute("href");
+
+    if (!imageUrl) {
+      return;
+    }
 
     var dataUrl = imageUrl.match(dataUrlRegex);
     if (dataUrl && dataUrl[2] === "image/svg+xml") {
@@ -3388,11 +3395,16 @@ SOFTWARE.
 
   // draws a rect
   var rect = function (node) {
+    var width = parseFloat(getAttribute(node, 'width'));
+    var height = parseFloat(getAttribute(node, 'height'));
+    if (!isFinite(width) || width <= 0 || !isFinite(height) || height <= 0) {
+      return
+    }
     _pdf.roundedRect(
         parseFloat(getAttribute(node, 'x')) || 0,
         parseFloat(getAttribute(node, 'y')) || 0,
-        parseFloat(getAttribute(node, 'width')),
-        parseFloat(getAttribute(node, 'height')),
+        width,
+        height,
         parseFloat(getAttribute(node, 'rx')) || 0,
         parseFloat(getAttribute(node, 'ry')) || 0
     );
@@ -3400,17 +3412,29 @@ SOFTWARE.
 
   // draws an ellipse
   var ellipse = function (node) {
+    var rx = parseFloat(getAttribute(node, 'rx'));
+    var ry = parseFloat(getAttribute(node, 'ry'));
+
+    if (!isFinite(rx) || rx <= 0 || !isFinite(ry)  || ry <= 0) {
+      return;
+    }
+
     _pdf.ellipse(
         parseFloat(getAttribute(node, 'cx')) || 0,
         parseFloat(getAttribute(node, 'cy')) || 0,
-        parseFloat(getAttribute(node, 'rx')),
-        parseFloat(getAttribute(node, 'ry'))
+        rx,
+        ry
     );
   };
 
   // draws a circle
   var circle = function (node) {
-    var radius = parseFloat(getAttribute(node, 'r')) || 0;
+    var radius = parseFloat(getAttribute(node, 'r'));
+
+    if (!isFinite(radius) || radius <= 0) {
+      return;
+    }
+
     _pdf.ellipse(
         parseFloat(getAttribute(node, 'cx')) || 0,
         parseFloat(getAttribute(node, 'cy')) || 0,
@@ -3429,6 +3453,29 @@ SOFTWARE.
       // TODO: capitalize, full-width
     }
   };
+
+  var textMeasuringTextElement = null;
+  function getMeasurementTextNode() {
+    if (!textMeasuringTextElement) {
+      textMeasuringTextElement = document.createElementNS(svgNamespaceURI, "text");
+
+      var svg = document.createElementNS(svgNamespaceURI, "svg");
+      svg.appendChild(textMeasuringTextElement);
+
+      svg.style.setProperty("position", "absolute");
+      svg.style.setProperty("visibility", "hidden");
+      document.body.appendChild(svg);
+    }
+
+    return textMeasuringTextElement
+  }
+
+  function cleanupTextMeasuring() {
+    if (textMeasuringTextElement) {
+      document.body.removeChild(textMeasuringTextElement.parentNode);
+      textMeasuringTextElement = null
+    }
+  }
 
   /**
    * Canvas text measuring is a lot faster than svg measuring. However, it is inaccurate for some fonts. So test each
@@ -3461,24 +3508,15 @@ SOFTWARE.
      * @param {string} fontWeight
      */
     function svgTextMeasure(text, fontFamily, fontSize, fontStyle, fontWeight) {
-      var textNode = document.createElementNS(svgNamespaceURI, "text");
+      var textNode = getMeasurementTextNode();
       textNode.setAttribute("font-family", fontFamily);
       textNode.setAttribute("font-size", fontSize);
       textNode.setAttribute("font-style", fontStyle);
       textNode.setAttribute("font-weight", fontWeight);
       textNode.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
-      textNode.appendChild(document.createTextNode(text));
+      textNode.textContent = text;
 
-      var svg = document.createElementNS(svgNamespaceURI, "svg");
-      svg.appendChild(textNode);
-      svg.setAttribute("visibility", "hidden");
-      document.body.appendChild(svg);
-
-      var width = textNode.getBBox().width;
-
-      document.body.removeChild(svg);
-
-      return width;
+      return textNode.getBBox().width;
     }
 
     var testString = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789!\"$%&/()=?'\\+*-_.:,;^}][{#~|<>";
@@ -3545,6 +3583,18 @@ SOFTWARE.
     return xOffset;
   }
 
+  function getTextRenderingMode(attributeState) {
+    var renderingMode = "invisible";
+    if (attributeState.fill && attributeState.stroke) {
+      renderingMode = "fillThenStroke";
+    } else if (attributeState.fill) {
+      renderingMode = "fill";
+    } else if (attributeState.stroke) {
+      renderingMode = "stroke";
+    }
+    return renderingMode;
+  }
+
   /**
    * @param {string} textAnchor
    * @param {number} originX
@@ -3591,6 +3641,17 @@ SOFTWARE.
         var textNodeAttributeState = attributeState.clone();
         var tSpanColor = getAttribute(textNode, "fill");
         setTextProperties(textNode, tSpanColor && new RGBColor(tSpanColor), textNodeAttributeState);
+        var tSpanStrokeColor = getAttribute(textNode, "stroke");
+        if (tSpanStrokeColor) {
+          var strokeRGB = new RGBColor(tSpanStrokeColor);
+          if (strokeRGB.ok) {
+            textNodeAttributeState.stroke = strokeRGB;
+          }
+        }
+        var strokeWidth = getAttribute(textNode, "stroke-width");
+        if (strokeWidth !== void 0) {
+          textNodeAttributeState.strokeWidth = parseFloat(strokeWidth)
+        }
 
         var tSpanDx = textNode.getAttribute("dx");
         if (tSpanDx !== null) {
@@ -3635,8 +3696,16 @@ SOFTWARE.
 
       _pdf.saveGraphicsState();
       putTextProperties(attributeStates[i], attributeState);
+      if (attributeStates[i].stroke && attributeStates[i].stroke !== attributeState.stroke && attributeStates[i].stroke.ok) {
+        var strokeRGB = attributeStates[i].stroke;
+        _pdf.setDrawColor(strokeRGB.r, strokeRGB.g, strokeRGB.b);
+      }
+      if (attributeStates[i].strokeWidth !== null && attributeStates[i].strokeWidth !== attributeState.strokeWidth) {
+        _pdf.setLineWidth(attributeStates[i].strokeWidth)
+      }
 
-      _pdf.text(xs[i] - textOffset, ys[i], this.texts[i], void 0, transform);
+      var textRenderingMode = getTextRenderingMode(attributeStates[i]);
+      _pdf.text(this.texts[i], xs[i] - textOffset, ys[i], {angle: transform, renderingMode: textRenderingMode === "fill" ? void 0 : textRenderingMode});
 
       _pdf.restoreGraphicsState();
     }
@@ -3708,12 +3777,15 @@ SOFTWARE.
       xOffset = getTextOffset(transformedText, attributeState);
 
       if (visibility === "visible") {
+        var textRenderingMode = getTextRenderingMode(attributeState);
         _pdf.text(
-            textX + dx - xOffset,
-            textY + dy,
-            transformedText,
-            void 0,
-            tfMatrix
+          transformedText,
+          textX + dx - xOffset,
+          textY + dy,
+          {
+            angle: tfMatrix,
+            renderingMode: textRenderingMode === "fill" ? void 0 : textRenderingMode
+          }
         );
       }
     } else {
@@ -4086,6 +4158,7 @@ SOFTWARE.
       var clipPathNode = refsHandler.getRendered(clipPathId[1]);
 
       if (!isPartlyVisible(clipPathNode)) {
+        _pdf.restoreGraphicsState();
         return;
       }
 
@@ -4119,7 +4192,7 @@ SOFTWARE.
     //
 
     // fill mode
-    if (nodeIs(node, "g,path,rect,text,ellipse,line,circle,polygon,polyline")) {
+    if (nodeIs(node, "svg,g,path,rect,text,ellipse,line,circle,polygon,polyline")) {
       function setDefaultColor() {
         fillRGB = new RGBColor("rgb(0, 0, 0)");
         hasFillColor = true;
@@ -4258,13 +4331,15 @@ SOFTWARE.
 
     }
 
-    if (nodeIs(node, "g,path,rect,ellipse,line,circle,polygon,polyline")) {
-      // text has no fill color, so don't apply it until here
+    if (nodeIs(node, "svg,text,g,path,rect,ellipse,line,circle,polygon,polyline")) {
       if (fillColor === "none") {
         attributeState.fill = null
       } else if (hasFillColor) {
         attributeState.fill = fillRGB;
-        _pdf.setFillColor(fillRGB.r, fillRGB.g, fillRGB.b);
+        if (!nodeIs(node, "text")) {
+          // text fill color will be applied through setTextColor()
+          _pdf.setFillColor(fillRGB.r, fillRGB.g, fillRGB.b);
+        }
       }
 
       // stroke mode
@@ -4452,6 +4527,8 @@ SOFTWARE.
       _pdf.restoreGraphicsState();
 
     });
+
+    cleanupTextMeasuring();
 
     return _pdf;
   };
